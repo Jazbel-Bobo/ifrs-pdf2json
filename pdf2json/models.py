@@ -32,7 +32,8 @@ class Footnote(BaseModel):
 
 class Paragraph(BaseModel):
     """A paragraph with optional clauses, tables, and footnotes."""
-    paragraph_id: str = Field(..., description="Human-readable paragraph ID (e.g., IAS_16:16, IAS_16:20A)")
+    paragraph_id: str = Field(..., description="Canonical paragraph ID (e.g., IAS_16:16, IAS_16:20A)")
+    paragraph_id_display: Optional[str] = Field(None, description="Display paragraph ID with Hebrew (e.g., IAS_16:20א, IAS_16:81יד)")
     content: str
     clauses: List[Clause] = []
     tables: List[Table] = []

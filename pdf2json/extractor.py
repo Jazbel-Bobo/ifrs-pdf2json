@@ -83,13 +83,13 @@ class SimpleStrategy(ParsingStrategy):
         if 'C' in appendix_lines_dict:
             appendix_C = self._parse_appendix(appendix_lines_dict['C'], standard_id, 'C')
         
-        # Extract definitions (basic pattern matching)
+        # Extract structured text (needed for both exclusions and definitions)
         structured_text = extractor.extract_text_with_structure()
-        definitions = self._extract_definitions(structured_text, standard_id)
         
         # Extract exclusions (look for untranslated markers)
         exclusions = self._extract_exclusions(structured_text)
         
+        # Create document first (needed for definition extraction)
         document = StandardDocument(
             standard_id=standard_id,
             standard_title=standard_title,
@@ -97,9 +97,13 @@ class SimpleStrategy(ParsingStrategy):
             appendix_A=appendix_A,
             appendix_B=appendix_B,
             appendix_C=appendix_C,
-            definitions=definitions,
+            definitions=[],  # Will be populated below
             exclusions=exclusions
         )
+        
+        # Now extract definitions from "הגדרות" section (paragraph 6) or Appendix A
+        definitions = self._extract_definitions(structured_text, standard_id, document)
+        document.definitions = definitions
         
         # Calculate confidence (basic heuristic)
         confidence = self._calculate_confidence(document, baseline_text)
@@ -128,21 +132,26 @@ class SimpleStrategy(ParsingStrategy):
         if hebrew_match:
             standard_number = hebrew_match.group(1)
             # Find the next meaningful Hebrew line after the standard number
-            match_end = hebrew_match.end()
-            remaining_text = page1_text[match_end:]
-            
-            # Look for next Hebrew line (subject)
-            hebrew_subject_pattern = re.compile(r'([א-ת\s]{3,50})', re.MULTILINE)
-            subject_matches = hebrew_subject_pattern.findall(remaining_text[:500])
-            
-            subject = None
-            for match in subject_matches:
-                text = match.strip()
-                # Skip if it's just the standard number or very short
-                if len(text) > 3 and text != standard_number and not text.isdigit():
-                    subject = text
+            # Look in page1_lines for better accuracy
+            match_line_idx = None
+            for idx, line in enumerate(page1_lines):
+                if hebrew_pattern.search(line["text"]):
+                    match_line_idx = idx
                     break
             
+            subject = None
+            if match_line_idx is not None:
+                # Look at next few lines for the subject (e.g., "רכוש קבוע")
+                for idx in range(match_line_idx + 1, min(match_line_idx + 5, len(page1_lines))):
+                    line_text = page1_lines[idx]["text"].strip()
+                    # Check if it's a Hebrew subject line (2-4 words, all Hebrew)
+                    if re.match(r'^[א-ת\s]{4,30}$', line_text) and len(line_text.split()) <= 4:
+                        # Skip if it's just numbers or very short
+                        if len(line_text) > 3 and not line_text.isdigit():
+                            subject = line_text
+                            break
+            
+            # Always include the number in Hebrew title
             if subject:
                 hebrew_title = f"תקן חשבונאות בינלאומי {standard_number} {subject}"
             else:
@@ -167,44 +176,51 @@ class SimpleStrategy(ParsingStrategy):
                     break
             
             subject = None
+            subject_parts = []
             if match_line_idx is not None:
-                # Look at next few lines for the subject
-                for idx in range(match_line_idx + 1, min(match_line_idx + 5, len(page1_lines))):
+                # Look at next few lines for the subject (may be wrapped across lines)
+                # Pattern: "Property, Plant and Equipment" - title case words
+                for idx in range(match_line_idx + 1, min(match_line_idx + 6, len(page1_lines))):
                     line_text = page1_lines[idx]["text"].strip()
+                    # Skip empty lines
+                    if not line_text:
+                        continue
                     # Check if line contains title case words (subject line)
-                    # Pattern: title case words separated by spaces/commas
-                    subject_pattern = re.compile(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s*,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)*)$')
-                    if subject_pattern.match(line_text):
-                        # Skip if it's just "International Accounting Standard" or similar
-                        if (len(line_text) > 10 and 
-                            "International" not in line_text and 
-                            "Accounting" not in line_text and
-                            "Standard" not in line_text):
-                            subject = line_text
-                            break
-                    # Also try a more flexible pattern for multi-line subjects
-                    elif re.match(r'^[A-Z][a-z]+', line_text) and len(line_text) > 5:
-                        # Check if it looks like a subject (not a header word)
+                    # Accept lines that are title case words (may be comma-separated)
+                    if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s*,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)*$', line_text):
+                        # Skip header words
                         skip_words = ["International", "Accounting", "Standard", "Financial", "Reporting"]
                         if not any(word in line_text for word in skip_words):
-                            subject = line_text
-                            break
+                            subject_parts.append(line_text)
+                    # Also accept single title case words that might be part of a multi-line subject
+                    elif re.match(r'^[A-Z][a-z]+$', line_text) and len(line_text) > 3:
+                        skip_words = ["International", "Accounting", "Standard", "Financial", "Reporting", "The"]
+                        if not any(word == line_text for word in skip_words):
+                            subject_parts.append(line_text)
+                
+                # Join subject parts (handle wrapped lines like "Property, Plant" / "and Equipment")
+                if subject_parts:
+                    subject = " ".join(subject_parts)
+                    # Clean up: remove extra spaces around commas
+                    subject = re.sub(r'\s*,\s*', ', ', subject)
             
             # Fallback: search in remaining text if not found in lines
             if not subject:
                 match_end = english_match.end()
                 remaining_text = page1_text[match_end:]
-                # Look for next English line (subject) - more flexible pattern
-                english_subject_pattern = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,6}(?:\s*,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)*)', re.MULTILINE)
-                subject_matches = english_subject_pattern.findall(remaining_text[:800])
+                # Look for "Property, Plant and Equipment" pattern
+                # Try to find title case words that form the subject
+                english_subject_pattern = re.compile(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,5}(?:\s*,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)*)', re.MULTILINE)
+                subject_matches = english_subject_pattern.findall(remaining_text[:1000])
                 
                 for match in subject_matches:
                     text = match.strip()
                     # Skip if it's too short or looks like a header
-                    if (len(text) > 8 and 
+                    if (len(text) > 10 and 
                         text not in ["International", "Accounting", "Standard"] and
                         "International" not in text and
-                        "Accounting" not in text):
+                        "Accounting" not in text and
+                        "Financial" not in text):
                         subject = text
                         break
             
@@ -236,21 +252,22 @@ class SimpleStrategy(ParsingStrategy):
         # Pattern for main content heading: "מטרת התקן"
         main_heading_pattern = re.compile(r'מטרת\s+התקן', re.IGNORECASE)
         
-        # Pattern for paragraph start: r'^\s*\.?\d+[א-ת]?\s' or r'^\s*\d+[א-ת]?\.'
-        # Also handle patterns like "20א", "81ה", etc.
-        # Specifically look for paragraph 1: ".1", "1.", "1 "
-        para_pattern1 = re.compile(r'^\s*\.?\d+[א-ת]?\s+')
-        para_pattern2 = re.compile(r'^\s*\d+[א-ת]?\.\s*')
-        para_pattern3 = re.compile(r'^\s*\.\d+[א-ת]?\s+')  # ".20א "
-        para_pattern_dot_one = re.compile(r'^\s*\.1\s+')  # ".1 "
-        para_pattern_one_dot = re.compile(r'^\s*1\.\s+')  # "1. "
-        para_pattern_one = re.compile(r'^\s*1\s+')  # "1 " (more conservative)
+        # PRIMARY pattern: number-dot format (NUMBER. or NUMBERLETTER.)
+        # Examples: "1.", "5.", "16.", "20א.", "81יד." (dot comes AFTER number/letters)
+        # Space after dot is optional (may be stripped by PDF extraction)
+        para_pattern_number_dot = re.compile(r'^(\d+)([א-ת]+)?\.\s*')  # Primary: "1.", "5.", "16.", "20א."
+        para_pattern_one_dot = re.compile(r'^\s*1\.\s*$')  # "1." on its own line - highest priority for first paragraph
+        
+        # FALLBACK patterns for other PDF formats
+        para_pattern_dot_number = re.compile(r'^\.(\d+)([א-ת]+)?\s+')  # ".16", ".20א" (dot before number)
+        para_pattern_dot_one = re.compile(r'^\.1\s+')  # ".1 " - fallback
+        para_pattern_one = re.compile(r'^\s*1\s+')  # "1 " - fallback
         
         toc_pages = set()
-        main_start_index = 0
+        main_start_index = None  # Use None to indicate not found yet
         found_heading = False
         
-        # Find TOC pages - mark all pages that contain TOC
+        # Find TOC pages - HARD EXCLUDE: mark ALL pages that contain TOC
         for i, line in enumerate(positioned_lines):
             if toc_pattern.search(line["text"]):
                 toc_pages.add(line["page"])
@@ -258,6 +275,17 @@ class SimpleStrategy(ParsingStrategy):
                 # (heuristic: if TOC found, mark next 2 pages as potentially TOC)
                 for p in range(line["page"], min(line["page"] + 3, 100)):
                     toc_pages.add(p)
+        
+        # Also exclude page 1 (cover page) from main content
+        cover_page = 1
+        toc_pages.add(cover_page)
+        
+        # Find first non-TOC page as fallback start
+        first_non_toc_index = None
+        for i, line in enumerate(positioned_lines):
+            if line["page"] not in toc_pages:
+                first_non_toc_index = i
+                break
         
         # Find main content start
         for i, line in enumerate(positioned_lines):
@@ -274,103 +302,148 @@ class SimpleStrategy(ParsingStrategy):
             
             # If we found the heading, look for the first paragraph
             if found_heading:
-                # Look for paragraph 1 specifically first
-                if (para_pattern_dot_one.match(line["text"]) or 
-                    para_pattern_one_dot.match(line["text"]) or
-                    (para_pattern_one.match(line["text"]) and len(line["text"].strip()) > 2)):
+                # Look for paragraph 1 specifically first ("1. " is the primary pattern)
+                if para_pattern_one_dot.match(line["text"]):
                     main_start_index = i
                     break
-                # Also accept other paragraph patterns if heading was found
-                elif (para_pattern1.match(line["text"]) or 
-                      para_pattern2.match(line["text"]) or 
-                      para_pattern3.match(line["text"])):
+                # Also accept other number-dot patterns if heading was found
+                elif para_pattern_number_dot.match(line["text"]):
+                    # Check it's a low number (likely paragraph 1-5)
+                    match = para_pattern_number_dot.match(line["text"])
+                    if match:
+                        para_num = int(match.group(1))
+                        if para_num <= 5:
+                            main_start_index = i
+                            break
+                # Fallback: dot-number patterns (for other PDF formats)
+                elif para_pattern_dot_one.match(line["text"]):
+                    main_start_index = i
+                    break
+                elif para_pattern_dot_number.match(line["text"]):
+                    match = para_pattern_dot_number.match(line["text"])
+                    if match:
+                        para_num = int(match.group(1))
+                        if para_num <= 5:
+                            main_start_index = i
+                            break
+                # Fallback: plain number
+                elif para_pattern_one.match(line["text"]) and len(line["text"].strip()) > 2:
                     main_start_index = i
                     break
             else:
                 # If no heading found yet, look for paragraph 1 as start indicator
-                if (para_pattern_dot_one.match(line["text"]) or 
-                    para_pattern_one_dot.match(line["text"])):
+                if para_pattern_one_dot.match(line["text"]):
                     main_start_index = i
                     break
-                # Fallback: any paragraph pattern if no heading
-                elif (para_pattern1.match(line["text"]) or 
-                      para_pattern2.match(line["text"]) or 
-                      para_pattern3.match(line["text"])):
-                    # Only use if it's a low number (likely paragraph 1-10)
-                    match = re.match(r'^\s*\.?(\d+)', line["text"])
+                # Also check for other early paragraphs ("2.", "3.", "5.", etc.) on first body page
+                elif para_pattern_number_dot.match(line["text"]):
+                    match = para_pattern_number_dot.match(line["text"])
                     if match:
                         para_num = int(match.group(1))
-                        if para_num <= 10:  # Likely early paragraph
+                        if para_num <= 5:  # Early paragraph
+                            main_start_index = i
+                            break
+                # Also check for separate-line format: "1" followed by "." on next line
+                elif i + 1 < len(positioned_lines):
+                    next_line_text = positioned_lines[i + 1]["text"].strip()
+                    current_line_text = line["text"].strip()
+                    if current_line_text == "1" and next_line_text == ".":
+                        # Check if line after "." has content
+                        if i + 2 < len(positioned_lines):
+                            content_line = positioned_lines[i + 2]["text"].strip()
+                            if content_line and len(content_line) > 2:
+                                main_start_index = i
+                                break
+                # Fallback: dot-number patterns
+                elif para_pattern_dot_one.match(line["text"]):
+                    main_start_index = i
+                    break
+                elif para_pattern_dot_number.match(line["text"]):
+                    match = para_pattern_dot_number.match(line["text"])
+                    if match:
+                        para_num = int(match.group(1))
+                        if para_num <= 5:  # Early paragraph
                             main_start_index = i
                             break
         
+        # If we didn't find a specific start, use first non-TOC page as fallback
+        if main_start_index is None:
+            main_start_index = first_non_toc_index if first_non_toc_index is not None else 0
+        
         return main_start_index
     
-    def _detect_paragraph_start(self, line_text: str) -> Optional[Tuple[str, str]]:
+    def _detect_paragraph_start(self, line_text: str) -> Optional[Tuple[str, str, str]]:
         """Detect if a line starts with a paragraph number token.
         
-        Supports formats: "7.", "20 .א", "29א.", "68א.", "81א.", "20A", "20א", etc.
+        Primary pattern: NUMBER. or NUMBERLETTER. (dot comes AFTER number/letters).
+        Examples: "5.", "81.", "81א.", "81יד." (יד is two Hebrew letters)
         
         Args:
             line_text: The line text to check
             
         Returns:
-            Tuple of (normalized_number, suffix) if paragraph start detected, None otherwise
-            Example: ("20", "א") or ("7", None)
+            Tuple of (normalized_number, suffix_canonical, suffix_display) if paragraph start detected, None otherwise
+            Example: ("20", "A", "א") or ("81", "ID", "יד") or ("7", None, None)
         """
         line_text = line_text.strip()
         if not line_text:
             return None
         
-        # Pattern 1: Dot-number pattern (highest priority for ".1", ".2", etc.): ".1 ", ".16 "
-        pattern_dot_number = re.compile(r'^\.(\d{1,3})\s+')
+        # Ignore artifacts: ranges like "69-68" or bracketed notes like "[בוטל]"
+        if re.match(r'^\d+-\d+', line_text) or re.match(r'^\[בוטל\]', line_text):
+            return None
+        
+        # PRIMARY PATTERN: Number-dot with optional Hebrew suffix (single or multi-letter)
+        # Pattern: "5.", "81.", "81א.", "81יד." (dot comes AFTER number/letters)
+        # Hebrew suffix can be 1-3 letters (א, ב, יד, טו, etc.)
+        # Space after dot is optional (may be stripped by PDF extraction)
+        # Paragraph number may be on its own line (just "1.") or on same line as content
+        pattern_number_dot = re.compile(r'^(\d{1,3})([א-ת]{1,3})?\.\s*')
+        match_primary = pattern_number_dot.match(line_text)
+        
+        if match_primary:
+            number = match_primary.group(1)
+            suffix_hebrew = match_primary.group(2) if match_primary.lastindex >= 2 and match_primary.group(2) else None
+            
+            # Check that there's content after the paragraph marker OR line is just the paragraph number
+            # (content will be on next line in that case)
+            rest = line_text[match_primary.end():].strip()
+            # Accept if: (1) content on same line, OR (2) line is just "NUMBER." (content on next line)
+            if (rest and len(rest) > 2) or (not rest and len(line_text.strip()) <= 5):
+                # Convert Hebrew suffix to canonical (Latin)
+                suffix_canonical = None
+                if suffix_hebrew:
+                    # Handle multi-letter Hebrew (e.g., "יד" -> "ID")
+                    if len(suffix_hebrew) == 1:
+                        suffix_canonical = hebrew_to_latin(suffix_hebrew)
+                    else:
+                        # Multi-letter: convert each letter
+                        suffix_canonical = "".join(hebrew_to_latin(c) for c in suffix_hebrew)
+                
+                return (number, suffix_canonical, suffix_hebrew)
+        
+        # FALLBACK PATTERN 1: Dot-number with optional Hebrew suffix: ".16", ".20א", ".81יד"
+        # For other PDF formats that use dot before number
+        pattern_dot_number = re.compile(r'^\.(\d{1,3})([א-ת]{1,3})?\s+')
         match_dot = pattern_dot_number.match(line_text)
         if match_dot:
             number = match_dot.group(1)
+            suffix_hebrew = match_dot.group(2) if match_dot.group(2) else None
+            
+            # Check that there's content after the paragraph marker
             rest = line_text[match_dot.end():].strip()
             if rest and len(rest) > 2:
-                return (number, None)
-        
-        # Pattern 1b: Number followed by dot and optional Hebrew/Latin letter: "7.", "20א.", "29א."
-        # Also handles "20 .א" (space before letter)
-        pattern1 = re.compile(r'^(\d{1,3})\s*\.?\s*([א-תA-Z])?\s*\.?\s*')
-        match1 = pattern1.match(line_text)
-        if match1:
-            number = match1.group(1)
-            suffix = match1.group(2) if match1.group(2) else None
-            # Check that there's content after the paragraph marker
-            rest = line_text[match1.end():].strip()
-            if rest and len(rest) > 2:  # Has meaningful content
-                return (number, suffix)
-        
-        # Pattern 2: Number followed by space and Hebrew/Latin letter: "20א ", "20A "
-        pattern2 = re.compile(r'^(\d{1,3})([א-תA-Z])\s+')
-        match2 = pattern2.match(line_text)
-        if match2:
-            number = match2.group(1)
-            suffix = match2.group(2)
-            rest = line_text[match2.end():].strip()
-            if rest and len(rest) > 2:
-                return (number, suffix)
-        
-        # Pattern 3: Number followed by dot and space: "7. ", "20. "
-        pattern3 = re.compile(r'^(\d{1,3})\s*\.\s+')
-        match3 = pattern3.match(line_text)
-        if match3:
-            number = match3.group(1)
-            rest = line_text[match3.end():].strip()
-            if rest and len(rest) > 2:
-                return (number, None)
-        
-        # Pattern 4: Plain number at start (more conservative): "7 ", "20 "
-        pattern4 = re.compile(r'^(\d{1,3})\s+')
-        match4 = pattern4.match(line_text)
-        if match4:
-            number = match4.group(1)
-            rest = line_text[match4.end():].strip()
-            # Only accept if followed by substantial content (not just a number)
-            if rest and len(rest) > 5 and not rest[0].isdigit():
-                return (number, None)
+                # Convert Hebrew suffix to canonical (Latin)
+                suffix_canonical = None
+                if suffix_hebrew:
+                    # Handle multi-letter Hebrew (e.g., "יד" -> "ID")
+                    if len(suffix_hebrew) == 1:
+                        suffix_canonical = hebrew_to_latin(suffix_hebrew)
+                    else:
+                        # Multi-letter: convert each letter
+                        suffix_canonical = "".join(hebrew_to_latin(c) for c in suffix_hebrew)
+                
+                return (number, suffix_canonical, suffix_hebrew)
         
         return None
     
@@ -378,8 +451,12 @@ class SimpleStrategy(ParsingStrategy):
         """Parse main content from positioned lines with improved paragraph detection."""
         paragraphs: List[Paragraph] = []
         current_paragraph: Optional[Paragraph] = None
+        processed_indices = set()  # Track lines that have been processed (for separate-line format)
         
-        for line in positioned_lines:
+        for line_idx, line in enumerate(positioned_lines):
+            # Skip already processed lines
+            if line_idx in processed_indices:
+                continue
             line_text = line["text"]
             if not line_text.strip():
                 # Empty line - continue accumulating into current paragraph
@@ -387,64 +464,121 @@ class SimpleStrategy(ParsingStrategy):
                     current_paragraph.content += "\n"
                 continue
             
-            # Check if this line starts a new paragraph
-            para_start = self._detect_paragraph_start(line_text)
+            # Skip "." lines that are part of separate-line format (number on previous line, "." on this line)
+            if line_idx > 0:
+                prev_line_text = positioned_lines[line_idx - 1]["text"].strip()
+                if line_text.strip() == '.' and prev_line_text and re.match(r'^\d+[א-ת]?$', prev_line_text):
+                    # This is a "." line following a number - skip it (content will be on next line)
+                    continue
+            
+            # Check for number-dot on separate lines: "22" followed by "." on next line
+            para_start = None
+            if line_idx + 1 < len(positioned_lines):
+                next_line_text = positioned_lines[line_idx + 1]["text"].strip()
+                # Pattern: current line is just a number (possibly with Hebrew suffix), next line is just "."
+                number_only_pattern = re.compile(r'^(\d{1,3})([א-ת]{1,3})?$')
+                match_number_only = number_only_pattern.match(line_text.strip())
+                if match_number_only and next_line_text == '.':
+                    number = match_number_only.group(1)
+                    suffix_hebrew = match_number_only.group(2) if match_number_only.lastindex >= 2 and match_number_only.group(2) else None
+                    # Check if line after "." has content
+                    if line_idx + 2 < len(positioned_lines):
+                        content_line = positioned_lines[line_idx + 2]["text"].strip()
+                        if content_line and len(content_line) > 2:
+                            # Convert Hebrew suffix to canonical
+                            suffix_canonical = None
+                            if suffix_hebrew:
+                                if len(suffix_hebrew) == 1:
+                                    suffix_canonical = hebrew_to_latin(suffix_hebrew)
+                                else:
+                                    suffix_canonical = "".join(hebrew_to_latin(c) for c in suffix_hebrew)
+                            para_start = (number, suffix_canonical, suffix_hebrew)
+                            # Mark the "." line (line_idx + 1) as processed - we'll skip it
+                            processed_indices.add(line_idx + 1)
+            
+            # If not found as separate-line format, check normal patterns
+            if not para_start:
+                para_start = self._detect_paragraph_start(line_text)
             
             if para_start:
                 # Close previous paragraph
                 if current_paragraph:
                     paragraphs.append(current_paragraph)
                 
-                # Extract paragraph number and suffix
-                para_number, para_suffix_raw = para_start
+                # Extract paragraph number, canonical suffix, and display suffix
+                para_number, para_suffix_canonical, para_suffix_display = para_start
                 
-                # Normalize suffix: convert Hebrew to Latin, remove spaces
-                para_suffix = None
-                if para_suffix_raw:
-                    if para_suffix_raw in HEBREW_TO_LATIN:
-                        para_suffix = hebrew_to_latin(para_suffix_raw)
-                    else:
-                        para_suffix = para_suffix_raw.upper()
-                
-                # Build paragraph ID
-                if para_suffix:
-                    para_id = f"{standard_id}:{para_number}{para_suffix}"
+                # Build canonical paragraph ID (e.g., "IAS_16:20A", "IAS_16:81ID")
+                if para_suffix_canonical:
+                    para_id = f"{standard_id}:{para_number}{para_suffix_canonical}"
                 else:
                     para_id = f"{standard_id}:{para_number}"
                 
-                # Extract content (everything after paragraph marker)
-                # Use the same detection logic to find where content starts
-                content = line_text
-                
-                # Try to match the patterns again to extract content
-                if para_suffix_raw:
-                    # Pattern with suffix: "20א.", "20 .א", "20א "
-                    patterns_with_suffix = [
-                        re.compile(rf'^{re.escape(para_number)}\s*\.?\s*{re.escape(para_suffix_raw)}\s*\.?\s*'),
-                        re.compile(rf'^{re.escape(para_number)}\s*\.\s*{re.escape(para_suffix_raw)}\s*'),
-                        re.compile(rf'^{re.escape(para_number)}{re.escape(para_suffix_raw)}\s+'),
-                    ]
-                    for pattern in patterns_with_suffix:
-                        match = pattern.match(line_text)
-                        if match:
-                            content = line_text[match.end():].strip()
-                            break
+                # Build display paragraph ID with Hebrew (e.g., "IAS_16:20א", "IAS_16:81יד")
+                if para_suffix_display:
+                    para_id_display = f"{standard_id}:{para_number}{para_suffix_display}"
                 else:
-                    # Pattern without suffix: "7.", "7. ", "7 "
-                    patterns_no_suffix = [
-                        re.compile(rf'^{re.escape(para_number)}\s*\.\s+'),
-                        re.compile(rf'^{re.escape(para_number)}\s*\.'),
-                        re.compile(rf'^{re.escape(para_number)}\s+'),
-                    ]
-                    for pattern in patterns_no_suffix:
+                    para_id_display = None  # Same as canonical if no suffix
+                
+                # Extract content (everything after paragraph marker)
+                # Check if this is separate-line format (number on this line, "." on next, content on line after)
+                content = ""
+                is_separate_line_format = (line_idx + 1 < len(positioned_lines) and 
+                                          positioned_lines[line_idx + 1]["text"].strip() == '.' and
+                                          para_start and line_text.strip() and 
+                                          re.match(r'^\d+[א-ת]?$', line_text.strip()))
+                
+                if is_separate_line_format:
+                    # Separate-line format: content starts on line_idx + 2
+                    if line_idx + 2 < len(positioned_lines):
+                        content = positioned_lines[line_idx + 2]["text"].strip()
+                        # Mark the content line as processed (it's already in the paragraph)
+                        processed_indices.add(line_idx + 2)
+                else:
+                    # Normal format: content on same line or next line
+                    # Primary pattern: "5.", "81.", "81א." (number-dot format)
+                    content = line_text
+                    if para_suffix_display:
+                        # Pattern with Hebrew suffix: "81א.", "81יד." (space after dot is optional)
+                        pattern = re.compile(rf'^{re.escape(para_number)}{re.escape(para_suffix_display)}\.\s*')
                         match = pattern.match(line_text)
                         if match:
                             content = line_text[match.end():].strip()
-                            break
+                        else:
+                            # Try without suffix: "81."
+                            pattern = re.compile(rf'^{re.escape(para_number)}\.\s*')
+                            match = pattern.match(line_text)
+                            if match:
+                                content = line_text[match.end():].strip()
+                            else:
+                                # Fallback: try dot-prefixed pattern ".81א "
+                                pattern = re.compile(rf'^\.{re.escape(para_number)}{re.escape(para_suffix_display)}\s+')
+                                match = pattern.match(line_text)
+                                if match:
+                                    content = line_text[match.end():].strip()
+                                else:
+                                    # Try dot-prefixed without suffix ".81 "
+                                    pattern = re.compile(rf'^\.{re.escape(para_number)}\s+')
+                                    match = pattern.match(line_text)
+                                    if match:
+                                        content = line_text[match.end():].strip()
+                    else:
+                        # Pattern without suffix: "5.", "81." (space after dot is optional)
+                        pattern = re.compile(rf'^{re.escape(para_number)}\.\s*')
+                        match = pattern.match(line_text)
+                        if match:
+                            content = line_text[match.end():].strip()
+                        else:
+                            # Fallback: try dot-prefixed pattern ".81 "
+                            pattern = re.compile(rf'^\.{re.escape(para_number)}\s+')
+                            match = pattern.match(line_text)
+                            if match:
+                                content = line_text[match.end():].strip()
                 
                 # Start new paragraph
                 current_paragraph = Paragraph(
                     paragraph_id=para_id,
+                    paragraph_id_display=para_id_display,
                     content=content,
                     clauses=[],
                     tables=[],
@@ -557,12 +691,14 @@ class SimpleStrategy(ParsingStrategy):
                     para_number = match.group(1)
                     # Build paragraph ID: IAS_16:B1 (canonical), IAS_16:ב1 (display)
                     para_id = f"{standard_id}:{appendix_id}{para_number}"
+                    para_id_display = f"{standard_id}:{hebrew_letter}{para_number}"
                     
                     # Extract content
                     content = line_text[match.end():].strip()
                     
                     current_paragraph = Paragraph(
                         paragraph_id=para_id,
+                        paragraph_id_display=para_id_display,
                         content=content,
                         clauses=[],
                         tables=[],
@@ -576,46 +712,41 @@ class SimpleStrategy(ParsingStrategy):
                 if current_paragraph:
                     paragraphs.append(current_paragraph)
                 
-                para_number, para_suffix_raw = para_start
-                para_suffix = None
-                if para_suffix_raw:
-                    if para_suffix_raw in HEBREW_TO_LATIN:
-                        para_suffix = hebrew_to_latin(para_suffix_raw)
-                    else:
-                        para_suffix = para_suffix_raw.upper()
+                para_number, para_suffix_canonical, para_suffix_display = para_start
                 
-                if para_suffix:
-                    para_id = f"{standard_id}:{para_number}{para_suffix}"
+                # Build canonical paragraph ID
+                if para_suffix_canonical:
+                    para_id = f"{standard_id}:{para_number}{para_suffix_canonical}"
                 else:
                     para_id = f"{standard_id}:{para_number}"
                 
-                # Extract content
-                content = line_text
-                if para_suffix_raw:
-                    patterns_with_suffix = [
-                        re.compile(rf'^{re.escape(para_number)}\s*\.?\s*{re.escape(para_suffix_raw)}\s*\.?\s*'),
-                        re.compile(rf'^{re.escape(para_number)}\s*\.\s*{re.escape(para_suffix_raw)}\s*'),
-                        re.compile(rf'^{re.escape(para_number)}{re.escape(para_suffix_raw)}\s+'),
-                    ]
-                    for pattern in patterns_with_suffix:
-                        match = pattern.match(line_text)
-                        if match:
-                            content = line_text[match.end():].strip()
-                            break
+                # Build display paragraph ID with Hebrew
+                if para_suffix_display:
+                    para_id_display = f"{standard_id}:{para_number}{para_suffix_display}"
                 else:
-                    patterns_no_suffix = [
-                        re.compile(rf'^{re.escape(para_number)}\s*\.\s+'),
-                        re.compile(rf'^{re.escape(para_number)}\s*\.'),
-                        re.compile(rf'^{re.escape(para_number)}\s+'),
-                    ]
-                    for pattern in patterns_no_suffix:
+                    para_id_display = None
+                
+                # Extract content (primary pattern: ".16", ".20א", ".81יד")
+                content = line_text
+                if para_suffix_display:
+                    pattern = re.compile(rf'^\.{re.escape(para_number)}{re.escape(para_suffix_display)}\s+')
+                    match = pattern.match(line_text)
+                    if match:
+                        content = line_text[match.end():].strip()
+                    else:
+                        pattern = re.compile(rf'^\.{re.escape(para_number)}\s+')
                         match = pattern.match(line_text)
                         if match:
                             content = line_text[match.end():].strip()
-                            break
+                else:
+                    pattern = re.compile(rf'^\.{re.escape(para_number)}\s+')
+                    match = pattern.match(line_text)
+                    if match:
+                        content = line_text[match.end():].strip()
                 
                 current_paragraph = Paragraph(
                     paragraph_id=para_id,
+                    paragraph_id_display=para_id_display,
                     content=content,
                     clauses=[],
                     tables=[],
@@ -794,29 +925,64 @@ class SimpleStrategy(ParsingStrategy):
             return True
         return False
     
-    def _extract_definitions(self, structured_text: List[Tuple[int, str, dict]], standard_id: str) -> List[Definition]:
-        """Extract definitions using pattern matching."""
+    def _extract_definitions(self, structured_text: List[Tuple[int, str, dict]], standard_id: str, document: StandardDocument) -> List[Definition]:
+        """Extract definitions ONLY from "הגדרות" section (paragraph 6) or Appendix A if present.
+        
+        Do not run heuristics on the whole document.
+        """
         definitions: List[Definition] = []
         
-        # Common definition patterns
-        definition_patterns = [
-            r"([\u0590-\u05FF\w\s]+)\s*[:–—]\s*(.+?)(?=\n\n|\n[A-Z]|$)",  # Hebrew term: definition
-            r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*means?\s+(.+?)(?=\n|$)",  # English term means definition
-        ]
+        # First check if Appendix A exists and contains definitions
+        if document.appendix_A:
+            # Extract from Appendix A sections
+            for section in document.appendix_A.sections:
+                for para in section.paragraphs:
+                    # Look for definition patterns in paragraph content
+                    # Pattern: Hebrew term: definition or English term means definition
+                    definition_patterns = [
+                        r"([\u0590-\u05FF\w\s]{3,50})\s*[:–—]\s*(.+?)(?=\n|$)",  # Hebrew term: definition
+                        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*means?\s+(.+?)(?=\n|$)",  # English term means definition
+                    ]
+                    for pattern in definition_patterns:
+                        matches = re.finditer(pattern, para.content, re.MULTILINE | re.IGNORECASE)
+                        for match in matches:
+                            term = match.group(1).strip()
+                            definition = match.group(2).strip()
+                            
+                            if len(term) > 2 and len(definition) > 10:
+                                definitions.append(Definition(
+                                    term=term,
+                                    definition=definition,
+                                    referenced_from=[para.paragraph_id]
+                                ))
+            # If found in Appendix A, return early
+            if definitions:
+                return definitions
         
-        for page_num, text, metadata in structured_text:
-            for pattern in definition_patterns:
-                matches = re.finditer(pattern, text, re.MULTILINE | re.IGNORECASE)
-                for match in matches:
-                    term = match.group(1).strip()
-                    definition = match.group(2).strip()
-                    
-                    if len(term) > 2 and len(definition) > 10:
-                        definitions.append(Definition(
-                            term=term,
-                            definition=definition,
-                            referenced_from=[]
-                        ))
+        # Otherwise, look for "הגדרות" section (paragraph 6)
+        # Find paragraph 6 in main content
+        for section in document.main.sections:
+            for para in section.paragraphs:
+                # Check if this is paragraph 6 (IAS_16:6)
+                if para.paragraph_id == f"{standard_id}:6":
+                    # Look for definition patterns in paragraph 6 content
+                    definition_patterns = [
+                        r"([\u0590-\u05FF\w\s]{3,50})\s*[:–—]\s*(.+?)(?=\n|$)",  # Hebrew term: definition
+                        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*means?\s+(.+?)(?=\n|$)",  # English term means definition
+                    ]
+                    for pattern in definition_patterns:
+                        matches = re.finditer(pattern, para.content, re.MULTILINE | re.IGNORECASE)
+                        for match in matches:
+                            term = match.group(1).strip()
+                            definition = match.group(2).strip()
+                            
+                            if len(term) > 2 and len(definition) > 10:
+                                definitions.append(Definition(
+                                    term=term,
+                                    definition=definition,
+                                    referenced_from=[para.paragraph_id]
+                                ))
+                    break
         
         return definitions
     

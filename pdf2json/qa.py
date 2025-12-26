@@ -30,6 +30,24 @@ class QAValidator:
         issues: List[str] = []
         warnings: List[str] = []
         
+        # Hard gate: Check body paragraphs == 0 (must fail immediately)
+        total_paragraphs = sum(
+            len(section.paragraphs) + sum(len(sub.paragraphs) for sub in section.subsections)
+            for section in document.main.sections
+        )
+        if total_paragraphs == 0:
+            issues.append("HARD FAIL: Body paragraphs == 0")
+            # Return failed QA immediately
+            return QADocument(
+                standard_id=document.standard_id,
+                passed=False,
+                score=0.10,
+                threshold=self.threshold,
+                checks={},
+                issues=issues,
+                warnings=warnings
+            )
+        
         # Check 0: TOC contamination (SPEC 13.2.2) - MUST FAIL if TOC appears in normative parts
         toc_contamination_score, toc_issues = self._check_toc_contamination(document, baseline_text)
         checks["toc_contamination"] = QACheck(
@@ -162,6 +180,11 @@ class QAValidator:
             for section in document.main.sections
         )
         
+        # HARD FAIL: Body paragraphs must be > 0
+        if total_paragraphs == 0:
+            score = 0.0
+            return score
+        
         # Count appendices paragraphs (primary normative content per SPEC 9.1)
         appendix_paragraphs = 0
         for appendix in [document.appendix_A, document.appendix_B, document.appendix_C]:
@@ -178,23 +201,39 @@ class QAValidator:
         else:
             score -= 0.2
         
-        # Check 4: Standard title completeness (SPEC 13.2.4)
+        # Check 4: Standard title completeness (SPEC 13.2.4) - HARD FAIL if missing
         title_ok = False
+        title_issues = []
         if document.standard_title:
-            # Hebrew title MUST include standard number
+            # Hebrew title MUST include standard number - HARD FAIL if missing
             if document.standard_title.hebrew:
                 # Check if number is in Hebrew title (e.g., "16" in "תקן חשבונאות בינלאומי 16 רכוש קבוע")
                 if re.search(r'\d+', document.standard_title.hebrew):
                     title_ok = True
+                else:
+                    title_issues.append("Hebrew title missing standard number")
+            else:
+                title_issues.append("Hebrew title missing")
+            
             # English title should be extracted if present on cover page
+            # Check if baseline suggests English title should be present
+            # For now, check if English title exists and is meaningful
             if document.standard_title.english:
                 # Check if it's more than just "International Accounting Standard X"
                 if len(document.standard_title.english) > len("International Accounting Standard XX") + 5:
                     title_ok = True
+                else:
+                    # Might be acceptable if only short form extracted
+                    pass
+            # Note: We don't hard fail on missing English if we can't detect it in baseline
         
         if title_ok:
             checks_passed += 1
         else:
+            # HARD FAIL if Hebrew title is missing number
+            if title_issues and "Hebrew" in " ".join(title_issues):
+                score = 0.0
+                return score
             score -= 0.2
         
         # Check 5: Structure is not empty (including appendices)
@@ -365,7 +404,7 @@ class QAValidator:
         if not paragraph_ids:
             return 0.0, ["No paragraphs found"]
         
-        # Check 1.5: Validate that IAS_16:1 and IAS_16:2 exist in main content (not appendices)
+        # Check 1.5: HARD FAIL if IAS_16:1 (display ".1") is not found in main content
         main_paragraph_ids = [
             para.paragraph_id
             for section in document.main.sections
@@ -376,10 +415,15 @@ class QAValidator:
                 main_paragraph_ids.extend([para.paragraph_id for para in subsec.paragraphs])
         
         standard_prefix = f"{document.standard_id}:"
-        expected_first_ids = [f"{standard_prefix}1", f"{standard_prefix}2"]
-        found_first = sum(1 for expected_id in expected_first_ids if expected_id in main_paragraph_ids)
-        if found_first == 0 and len(main_paragraph_ids) > 0:
-            issues.append(f"Expected first paragraphs ({', '.join(expected_first_ids)}) not found in main content - main content may not start correctly")
+        expected_first_id = f"{standard_prefix}1"
+        if expected_first_id not in main_paragraph_ids:
+            issues.append(f"HARD FAIL: Expected first paragraph {expected_first_id} not found in main content - main content does not start correctly")
+            return 0.0, issues  # Hard fail
+        
+        # Check 1.6: HARD FAIL if total body paragraphs < 60 (for IAS 16)
+        if len(main_paragraph_ids) < 60:
+            issues.append(f"HARD FAIL: Only {len(main_paragraph_ids)} paragraphs found in main content, expected at least 60")
+            return 0.0, issues  # Hard fail
         
         # Check 2: Extract expected paragraph numbers from baseline
         expected_numbers = self._extract_expected_paragraph_numbers(baseline_text, document.standard_id)
@@ -394,7 +438,11 @@ class QAValidator:
         # Check 3: Coverage - how many expected numbers were found
         if expected_numbers:
             coverage = len(found_numbers & expected_numbers) / len(expected_numbers)
-            if coverage < 0.5:
+            # HARD FAIL if coverage < 0.95
+            if coverage < 0.95:
+                issues.append(f"HARD FAIL: Coverage {coverage:.2%} < 0.95 (found {len(found_numbers & expected_numbers)}/{len(expected_numbers)} expected paragraph numbers)")
+                return 0.10, issues  # Hard fail with low score
+            elif coverage < 0.5:
                 issues.append(f"Low coverage: found {len(found_numbers & expected_numbers)}/{len(expected_numbers)} expected paragraph numbers")
         else:
             # If no expected numbers found in baseline, use found numbers as baseline

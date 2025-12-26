@@ -1,0 +1,12 @@
+﻿Processing IAS_16 from pdfs/IAS 16.pdf
+Step 1: Extracting baseline text...
+python : Error during processing: 'charmap' codec can't encode character '\u2713' in position 0: character maps to 
+<undefined>
+At C:\Users\Lenovo\AppData\Local\Temp\ps-script-b5d89590-1a89-41f7-9e8a-76b6976f3ecf.ps1:79 char:165
++ ... -pdf2json"; python -m pdf2json fix "pdfs/IAS 16.pdf" --out out 2>&1 | ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Error during pr... to <undefined>:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+Error: All parsing strategies failed
