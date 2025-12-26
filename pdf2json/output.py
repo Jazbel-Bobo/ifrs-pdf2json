@@ -126,14 +126,23 @@ class OutputGenerator:
             border-radius: 5px;
         }}
         .paragraph {{
-            margin: 10px 0;
-            padding: 10px;
+            margin: 15px 0;
+            padding: 15px;
             background-color: white;
             border-left: 3px solid #2196F3;
+            border-radius: 3px;
         }}
         .paragraph-id {{
             font-weight: bold;
             color: #2196F3;
+            font-size: 1.1em;
+            display: block;
+            margin-bottom: 8px;
+        }}
+        .paragraph-content {{
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
         }}
         .qa-section {{
             margin: 30px 0;
@@ -247,8 +256,9 @@ class OutputGenerator:
             # Add paragraphs
             for para in section.paragraphs:
                 html += f'            <div class="paragraph">\n'
-                html += f'                <span class="paragraph-id">{para.paragraph_id}</span>: '
-                html += f'{self._escape_html(para.content[:200])}{"..." if len(para.content) > 200 else ""}</div>\n'
+                html += f'                <span class="paragraph-id">{para.paragraph_id}</span>\n'
+                html += f'                <div class="paragraph-content">{self._escape_html(para.content)}</div>\n'
+                html += f'            </div>\n'
             
             # Add subsections
             for sub in section.subsections:
@@ -256,8 +266,9 @@ class OutputGenerator:
                     html += f"            <h4>{self._escape_html(sub.subsection_title)}</h4>\n"
                 for para in sub.paragraphs:
                     html += f'            <div class="paragraph">\n'
-                    html += f'                <span class="paragraph-id">{para.paragraph_id}</span>: '
-                    html += f'{self._escape_html(para.content[:200])}{"..." if len(para.content) > 200 else ""}</div>\n'
+                    html += f'                <span class="paragraph-id">{para.paragraph_id}</span>\n'
+                    html += f'                <div class="paragraph-content">{self._escape_html(para.content)}</div>\n'
+                    html += f'            </div>\n'
             
             html += "        </div>\n"
         
@@ -276,15 +287,17 @@ class OutputGenerator:
                         html += f"            <h4>{self._escape_html(section.section_title)}</h4>\n"
                         for para in section.paragraphs:
                             html += f'            <div class="paragraph">\n'
-                            html += f'                <span class="paragraph-id">{para.paragraph_id}</span>: '
-                            html += f'{self._escape_html(para.content[:200])}{"..." if len(para.content) > 200 else ""}</div>\n'
+                            html += f'                <span class="paragraph-id">{para.paragraph_id}</span>\n'
+                            html += f'                <div class="paragraph-content">{self._escape_html(para.content)}</div>\n'
+                            html += f'            </div>\n'
                         for sub in section.subsections:
                             if sub.subsection_title:
                                 html += f"            <h5>{self._escape_html(sub.subsection_title)}</h5>\n"
                             for para in sub.paragraphs:
                                 html += f'            <div class="paragraph">\n'
-                                html += f'                <span class="paragraph-id">{para.paragraph_id}</span>: '
-                                html += f'{self._escape_html(para.content[:200])}{"..." if len(para.content) > 200 else ""}</div>\n'
+                                html += f'                <span class="paragraph-id">{para.paragraph_id}</span>\n'
+                                html += f'                <div class="paragraph-content">{self._escape_html(para.content)}</div>\n'
+                                html += f'            </div>\n'
                     
                     html += "        </div>\n"
         

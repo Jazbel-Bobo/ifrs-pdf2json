@@ -198,8 +198,8 @@ class BaselineExtractor:
         
         # Primary pattern: Number-dot with optional Hebrew suffix: "5.", "81.", "81א." (dot comes AFTER number/letters)
         # This is the correct format per user specification: NUMBER. or NUMBERLETTER.
-        # Space after dot is optional (may be stripped by PDF extraction)
-        pattern_number_dot_hebrew = re.compile(r'^(\d{1,3})([א-ת]{1,3})?\.\s*')
+        # Handle both "17." and "17 ." formats (space before/after dot is optional)
+        pattern_number_dot_hebrew = re.compile(r'^(\d{1,3})([א-ת]{1,3})?\s*\.\s*')
         
         # Fallback pattern 1: Dot-number pattern: ".1 " or ".16 " (for other PDF formats)
         pattern_dot_number = re.compile(r'^\.(\d{1,3})([א-ת]{1,3})?\s+')
@@ -264,8 +264,9 @@ class BaselineExtractor:
                             regex_name = "number-dot-separate"
                             matched = True
                 
-                # PRIMARY PATTERN: Number-dot with optional Hebrew suffix: "5.", "81.", "81א."
+                # PRIMARY PATTERN: Number-dot with optional Hebrew suffix: "5.", "81.", "81א.", "17 ."
                 # Format: NUMBER. or NUMBERLETTER. (dot comes AFTER number/letters)
+                # Handle both "17." and "17 ." formats (space before dot is optional)
                 # Paragraph number may be on its own line (followed by content on next line) or on same line as content
                 if not matched:
                     match_primary = pattern_number_dot_hebrew.match(line_text)
